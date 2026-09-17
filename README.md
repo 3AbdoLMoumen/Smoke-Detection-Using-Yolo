@@ -1,114 +1,187 @@
-# Smoke Detection and Growth Quantification Using YOLO
+# Wildfire and Smoke Detection Model Training with YOLO26
 
 ## Overview
 
-This project implements a video-based smoke detection and growth analysis pipeline built upon the YOLO (You Only Look Once) object detection framework. The system processes an input video frame by frame, detects regions of smoke, quantifies the aggregate detected smoke area over time, and produces two primary outputs: an annotated video with stylized bounding boxes and a live growth overlay, and a post-processed analytical chart depicting the temporal evolution of smoke area with a fitted trend line.
+This repository documents the training procedure for a YOLO26-based object detection model designed to identify smoke and wildfire regions in long-distance aerial and ground-based imagery. The workflow encompasses dataset preparation, class-imbalance mitigation via targeted oversampling, model training, and quantitative evaluation of detection performance.
 
-The objective of this pipeline is to provide both a qualitative visual assessment (via annotated video) and a quantitative growth analysis (via the exported chart) suitable for research, monitoring, or early-warning applications related to fire and smoke development.
+The resulting model is intended for integration into downstream smoke and fire monitoring pipelines, including video-based growth analysis systems.
 
-## Methodology
+## Dataset
 
-### Detection
+Training data is drawn from the Long-Distance Wildfire & Smoke Detection Dataset, which contains two annotated classes:
 
-Smoke detection is performed using a YOLO model (via the `ultralytics` library) loaded from a user-supplied weights file. For each video frame, the model generates bounding box predictions, which are filtered according to a configurable confidence threshold and a minimum area threshold to reduce the influence of spurious, low-confidence, or negligible detections.
+| Class ID | Class Name |
+|---|---|
+| 0 | smoke |
+| 1 | wildfire |
 
-### Area Quantification
+### Citation
 
-For each frame, the total detected smoke area is computed as the sum of the pixel areas of all bounding boxes exceeding the minimum area threshold. This aggregate value is recorded across all frames to construct a time series representing the growth of detected smoke over the duration of the video.
+```bibtex
+@dataset{simuletic_wildfire_smoke_2026,
+  author    = {Simuletic Team},
+  title     = {Long-Range Wildfire \& Smoke Detection Dataset},
+  year      = {2026},
+  publisher = {Kaggle},
+  url       = {https://simuletic.com/datasets}
+}
+```
 
-### Visualization
+## Data Preparation
 
-Two complementary visualizations are produced:
+### Train/Validation Split
 
-1. **Real-time overlay**: Each output frame includes stylized bounding boxes (rendered with corner-bracket, heads-up-display styling) around detected smoke regions, along with a live line graph embedded in the frame that displays recent smoke area values, drawn using OpenCV primitives.
-2. **Post-processing chart**: Following completion of video processing, a chart is generated using Plotly, displaying the raw per-frame smoke area alongside a smoothed trend line. The trend line is obtained via Support Vector Regression (SVR) with a radial basis function (RBF) kernel, fitted to the standardized time series to characterize the underlying growth trend independent of frame-to-frame noise.
+Images and corresponding YOLO-format label files were partitioned into training and validation subsets using an 80/20 split, with a fixed random seed (42) to ensure reproducibility. File association between images and labels was performed via symbolic linking to avoid data duplication on disk.
+
+| Split | Images |
+|---|---|
+| Train | 191 |
+| Validation | 48 |
+
+All images were confirmed to have a corresponding label file (zero missing labels).
+
+### Class Imbalance and Oversampling
+
+Initial inspection of the training split revealed a substantial class imbalance between the two annotated categories:
+
+| Class | Instances (pre-oversampling) |
+|---|---|
+| smoke (0) | 204 |
+| wildfire (1) | 58 |
+
+To mitigate this imbalance, training images containing at least one wildfire annotation were identified (38 images) and oversampled by a factor of three via symbolic-link duplication of both the image and its corresponding label file. This procedure added 76 duplicated wildfire-containing images to the training set without altering the underlying data.
+
+Following oversampling, class instance counts in the training split were as follows:
+
+| Class | Instances (post-oversampling) |
+|---|---|
+| smoke (0) | 286 |
+| wildfire (1) | 174 |
+
+### Dataset Configuration
+
+A `data.yaml` configuration file was generated to define dataset paths and class names for use with the Ultralytics training pipeline:
+
+```yaml
+path: /kaggle/working/dataset
+train: images/train
+val: images/val
+names:
+  0: smoke
+  1: wildfire
+```
+
+## Model and Training Configuration
+
+The model was initialized from pretrained YOLO26-small (`yolo26s.pt`) weights and fine-tuned using the Ultralytics training API. Key training parameters are summarized below:
+
+| Parameter | Value |
+|---|---|
+| Base model | YOLO26s (9.9M parameters) |
+| Epochs | 150 (max), early stopping at 148 |
+| Image size | 960 × 960 |
+| Devices | 2 × NVIDIA Tesla T4 (multi-GPU, DDP) |
+| Classification loss weight (`cls`) | 2.0 |
+| Early stopping patience | 40 epochs |
+| Scale augmentation | 0.5 |
+| Copy-paste augmentation | 0.3 |
+| Mixup augmentation | 0.15 |
+| Optimizer | AdamW (auto-selected), lr0 = 0.001667, momentum = 0.9 |
+
+The elevated classification loss weight was applied to further emphasize correct class discrimination given the underlying class imbalance, complementing the oversampling strategy described above.
+
+Training completed in approximately 0.415 hours (148 epochs), with early stopping triggered after 40 epochs without improvement. The best-performing checkpoint was obtained at epoch 108 and saved as `best.pt`.
+
+## Results
+
+### Overall Validation Performance (Best Checkpoint)
+
+| Metric | Value |
+|---|---|
+| Precision | 0.507 |
+| Recall | 0.547 |
+| mAP50 | 0.514 |
+| mAP50-95 | 0.208 |
+
+### Per-Class Performance (Best Checkpoint)
+
+| Class | Images | Instances | Precision | Recall | mAP50 | mAP50-95 |
+|---|---|---|---|---|---|---|
+| smoke | 48 | 51 | 0.755 | 0.863 | 0.852 | 0.358 |
+| wildfire | 9 | 13 | 0.259 | 0.231 | 0.175 | 0.059 |
+
+### Post-Training Validation Pass (conf = 0.1)
+
+A subsequent validation pass was conducted at a lowered confidence threshold (0.1) to characterize performance under more permissive detection conditions:
+
+| Metric | Value |
+|---|---|
+| Precision | 0.5196 |
+| Recall | 0.5468 |
+| mAP50 | 0.5019 |
+| mAP50-95 | 0.2020 |
+
+| Class | Precision | Recall | mAP50 | mAP50-95 |
+|---|---|---|---|---|
+| smoke | 0.7796 | 0.8627 | 0.8506 | 0.3520 |
+| wildfire | 0.2596 | 0.2308 | 0.1532 | 0.0521 |
+
+### Interpretation
+
+Detection performance for the smoke class is substantially stronger than for the wildfire class across all metrics, reflecting both the smaller number of wildfire instances available for training and validation and the inherent visual difficulty of distinguishing flame regions at long range. Despite oversampling, the wildfire class remains data-limited (13 validation instances), and reported metrics for this class should be interpreted with corresponding caution regarding statistical reliability.
 
 ## Repository Structure
 
 ```
 .
-├── main.py     # Primary detection, annotation, and analysis script
-└── README.md
+├── data.yaml                          # Dataset configuration
+├── dataset/                           # Prepared train/val image and label symlinks
+├── runs/detect/train/                 # Training outputs (weights, logs, plots)
+│   └── weights/
+│       ├── best.pt                    # Best checkpoint (epoch 108)
+│       └── last.pt                    # Final checkpoint
+└── archive.zip                        # Compressed archive of training run outputs
 ```
 
 ## Requirements
 
-The following Python packages are required:
-
-- `ultralytics`
-- `opencv-python`
-- `plotly`
-- `kaleido`
-- `scikit-learn`
-- `numpy`
-
-These dependencies may be installed via:
-
 ```bash
-pip install ultralytics opencv-python plotly kaleido scikit-learn numpy
+pip install ultralytics pandas pyyaml
 ```
-
-## Configuration
-
-Pipeline parameters are defined in the configuration section at the top of `main.py` and may be modified as needed:
-
-| Parameter | Description |
-|---|---|
-| `MODEL_PATH` | Path to the trained YOLO weights file (e.g., `best.pt`) |
-| `INPUT_VIDEO` | Path to the source video for analysis |
-| `OUTPUT_VIDEO` | Destination path for the annotated output video |
-| `OUTPUT_CHART_HTML` | Destination path for the interactive HTML growth chart |
-| `OUTPUT_CHART_PNG` | Destination path for the static PNG growth chart |
-| `CONF_THRESHOLD` | Minimum detection confidence considered valid |
-| `IOU_THRESHOLD` | Intersection-over-union threshold used for non-maximum suppression |
-| `MIN_BOX_AREA` | Minimum bounding box area (in pixels squared) considered valid |
-| `BOX_COLOR`, `CORNER_LEN`, `BOX_THICKNESS` | Visual parameters for bounding box rendering |
-| `GRAPH_PANEL_W`, `GRAPH_PANEL_H`, `GRAPH_MARGIN`, `GRAPH_MAX_POINTS` | Visual parameters for the live overlay graph |
-| `SVR_KERNEL`, `SVR_C`, `SVR_EPSILON` | Parameters governing the Support Vector Regression trend fit |
 
 ## Usage
 
-1. Place the trained YOLO weights file and the target input video in the working directory, or update `MODEL_PATH` and `INPUT_VIDEO` accordingly.
-2. Execute the script:
-
-```bash
-python main.py
-```
-
-3. Upon completion, the following outputs will be generated:
-   - An annotated video file (`demo_fire_annotated.mp4` by default) containing bounding box overlays and a live growth graph.
-   - An interactive HTML chart (`smoke_growth_chart.html`) and a static PNG chart (`smoke_growth_chart.png`) depicting smoke area growth over time with a fitted trend line.
-
-Alternatively, the pipeline may be invoked programmatically:
+### Training
 
 ```python
-from main import run
-run()
+from ultralytics import YOLO
+
+model = YOLO("yolo26s.pt")
+results = model.train(
+    data="data.yaml",
+    epochs=150,
+    imgsz=960,
+    device=[0, 1],
+    cls=2.0,
+    patience=40,
+    scale=0.5,
+    copy_paste=0.3,
+    mixup=0.15,
+)
 ```
 
-## Output Description
+### Validation
 
-### Annotated Video
+```python
+metrics = model.val(data="data.yaml", split="val", conf=0.1)
+```
 
-Each frame of the output video contains:
+## Limitations
 
-- Red, HUD-style bounding boxes around detected smoke regions, labeled with class name and confidence score.
-- A semi-transparent panel in the lower-right corner displaying a live line graph of recent smoke area measurements.
-- A frame counter in the upper-left corner.
-
-### Growth Chart
-
-The exported chart presents:
-
-- The raw, per-frame detected smoke area as a function of time, rendered as a shaded area plot.
-- A smoothed trend line obtained via SVR regression, illustrating the underlying growth pattern independent of frame-level noise.
-
-## Notes and Limitations
-
-- Detection accuracy is contingent upon the quality and domain relevance of the supplied YOLO weights.
-- The SVR trend line is computed only when a minimum of five data points is available; videos of insufficient length or frame count will produce the raw area plot without a fitted trend.
-- Static PNG export via Kaleido requires a functioning Kaleido installation; failure to export the PNG does not interrupt generation of the HTML chart.
+- The wildfire class is represented by a comparatively small number of instances (58 pre-oversampling, 174 post-oversampling in training; 13 in validation), limiting the statistical robustness of reported wildfire detection metrics.
+- Oversampling was performed via duplication of existing wildfire-containing images rather than synthetic data generation; this addresses class frequency but does not introduce additional visual diversity for the underrepresented class.
+- Validation set size (48 images, 64 total instances) is modest, and reported metrics should be considered indicative rather than definitive of generalization performance on unseen data.
 
 ## License
 
-No license has been specified for this repository. Users should consult the repository owner regarding permitted use, modification, and distribution of this code.
+No license has been specified for this repository. Users should consult the dataset publisher and repository owner regarding permitted use, modification, and distribution of the code and data.
